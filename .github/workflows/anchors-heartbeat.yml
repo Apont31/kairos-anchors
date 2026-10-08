@@ -1,0 +1,90 @@
+# The heartbeat of the anchors (ADR-035 Q8, decision A), kept in the kairos
+# repository and copied by the user into kairos-anchors/.github/workflows/
+# (docs/FORWARD_SETUP.md, part 7). It fails, and GitHub emails the user, when
+# an anchor file of a watched evaluation has had no commit for more than
+# max_age_hours (36 by default, the threshold of `kairos forward status`). It
+# reads the history only: never the content of an anchor, nothing written.
+#
+# WATCHED, below: the evaluations watched, one directory each. Every .jsonl
+# file in it must have a recent commit of its own. smoke-test/ and README.md
+# are not watched. When an evaluation starts or ends, this list is changed by
+# hand, here and in kairos-anchors (part 7).
+
+name: anchors heartbeat
+
+on:
+  schedule:
+    - cron: "17 */3 * * *"
+  workflow_dispatch:
+    inputs:
+      max_age_hours:
+        description: "Hours an anchor file may go without a commit (0: the witness, fails)"
+        required: false
+        default: "36"
+
+permissions:
+  contents: read
+
+env:
+  WATCHED: "fwd-001 fwd-002"
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6.1.0
+        with:
+          fetch-depth: 0
+      - name: Age of the last commit of each anchor file
+        env:
+          MAX_AGE_HOURS: ${{ inputs.max_age_hours || '36' }}
+        shell: python
+        run: |
+          import math
+          import os
+          import subprocess
+          import sys
+          import time
+          from pathlib import Path
+
+          watched = os.environ["WATCHED"].split()
+          try:
+              max_age = float(os.environ.get("MAX_AGE_HOURS", ""))
+          except ValueError:
+              max_age = math.nan
+          if not 0 <= max_age < math.inf:
+              print("max_age_hours must be a number of hours, 0 or more")
+              sys.exit(2)
+          now = float(os.environ.get("HEARTBEAT_NOW") or time.time())
+
+          late, missing = [], []
+          for directory in watched:
+              files = sorted(Path(directory).glob("*.jsonl"))
+              if not files:
+                  print(f"{directory}/: no anchor file")
+                  missing.append(f"{directory}/")
+                  continue
+              for path in files:
+                  name = path.as_posix()
+                  last = subprocess.run(["git", "log", "-1", "--format=%ct %h", "--", name],
+                                        capture_output=True, text=True, check=True).stdout.split()
+                  if not last:
+                      print(f"{name}: no commit")
+                      missing.append(name)
+                      continue
+                  age = (now - int(last[0])) / 3600
+                  print(f"{name}: {age:.1f} h, commit {last[1]}")
+                  if age > max_age:
+                      late.append(name)
+
+          for name in late:
+              print(f"late: {name}")
+          for name in missing:
+              print(f"missing: {name}")
+          if late or missing:
+              print(f"FAILED: {len(late)} late, {len(missing)} without a commit or a file"
+                    f" (max_age_hours {max_age:g})")
+              sys.exit(1)
+          print(f"OK: every anchor file of {' '.join(watched)} has a commit younger than"
+                f" {max_age:g} h")
